@@ -1,0 +1,74 @@
+
+App Name (TBD)
+A smooth, modern S3 browser for desktop built with Golang
+
+Purpose
+Provide users with a fast, clean, and efficient way to browse and preview their S3 buckets and objects using existing AWS CLI credentials.
+
+Target Platform
+- Desktop (macOS, Windows, Linux)
+- Built using Golang
+- GUI powered by frameworks like Fyne, Wails, or Lorca for sleek UI and animation
+
+Key Features
+
+1. Credential Selection Page
+- Reads AWS CLI profiles (from ~/.aws/credentials and ~/.aws/config)
+- Let users choose:
+  - default profile
+  - Another named profile
+- Instructions to configure via terminal if no valid credential is found
+
+2. Bucket Listing Page
+- Displays all accessible S3 buckets
+- Pagination: 10 / 20 buckets per page
+- Features:
+  - Search by bucket name
+  - Next / Previous navigation
+- Animation for transitions between states (profile -> bucket list)
+
+3. Bucket Explorer Page
+- Lists contents of a selected bucket
+- Columns:
+  - Name (folder/object)
+  - Last modified
+  - Type (folder, file extension)
+- Features:
+  - Pagination: 20 / 50 items per page
+  - Sorting: Name, Type, Last Modified
+  - Search/filter by name
+- Folder navigation with breadcrumb path UI
+
+4. File Preview Window
+- Previews for:
+  - Images (JPG, PNG, etc.)
+  - Text/JSON
+  - PDFs
+- Opens in a clean, separate modal or window
+- Supports zoom, scroll, basic formatting
+
+UX/UI Goals
+- Apple-inspired minimal design
+- Smooth transitions and loading indicators
+- Responsive layout
+- Dark mode / light mode toggle (optional)
+
+Tech Stack
+- Golang
+  - aws-sdk-go-v2 for interacting with S3
+- Frontend Framework (UI layer)
+  - Fyne (fully Go, modern and native-feel)
+  - OR Wails (Go backend + modern JS frontend)
+- Bundled as a native desktop app for each platform
+
+Security Considerations
+- No credential storage in-app
+- Relies fully on AWS CLI configuration
+- Only makes calls using local profile credentials
+
+Future Ideas
+- Drag-and-drop upload/download
+- Multi-bucket management
+- Bookmark folders or files
+- CloudFront URL generator
+- IAM policy view for each bucket (read-only)
