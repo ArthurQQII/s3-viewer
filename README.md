@@ -1,151 +1,159 @@
-# S3 Viewer
+# S9s - Terminal Based S3 Explorer
 
-A desktop application for browsing and managing AWS S3 buckets with a modern, user-friendly interface.
+A powerful, terminal-based S3 bucket explorer with an intuitive interface inspired by k9s.
+
+![S9s Demo](docs/images/demo.gif)
 
 ## Features
 
-### Bucket Navigation
-- Browse S3 buckets and folders with an intuitive interface
-- Breadcrumb navigation for easy folder traversal
-- Efficient loading of large buckets with progressive loading
-- Clear folder structure visualization
+### Terminal UI
+- Clean, responsive terminal interface
+- Vim-style keybindings
+- Real-time updates
+- Resource usage optimized
+- Color-coded status indicators
 
-### File Management
-- View file details: name, size, last modified date, and content type
-- Download individual files or entire folders
-- Preview support for multiple file types:
-  - Images: Direct preview in the application
-  - Videos: Browser-based preview with pre-signed URLs
-  - Text files: Built-in text viewer
-  - JSON files: Formatted preview
+### Navigation
+- Fast bucket and object browsing
+- Breadcrumb navigation
+- Quick folder traversal
+- Fuzzy search support
+- Customizable views
 
-### Search and Filter
-- Real-time search functionality
-- Search by:
-  - File name
-  - File extension (e.g., .mp4, .jpg)
-  - Content type
-- Clear search button for quick reset
+### File Operations
+- Streaming file preview
+- Batch operations support
+- Progress indicators
+- Background downloads
+- Multi-file selection
 
-### Sorting
-- Sort by any column:
-  - Name
-  - Size
-  - Last Modified
-  - Content Type
-- Toggle between ascending and descending order
-
-### Performance Features
-- Progressive loading for large buckets
-- Background loading of objects
-- Immediate display of first 100 items
-- Responsive UI during loading
-- Pagination with customizable page size
+### Performance
+- Asynchronous operations
+- Efficient memory usage
+- Lazy loading of large directories
+- Cached responses
+- Minimal CPU footprint
 
 ### AWS Integration
-- AWS CLI profile support
-- Secure credential management
-- Pre-signed URLs for video streaming
-- Proper error handling for invalid credentials
-
-## Requirements
-
-- Python 3.8 or higher
-- PyQt6
-- boto3
-- AWS CLI configured with valid credentials
+- AWS profile support
+- IAM role assumption
+- MFA support
+- Cross-region access
+- Endpoint configuration
 
 ## Installation
 
-1. Clone the repository:
+### From Source
 ```bash
-git clone https://github.com/yourusername/s3-viewer.git
-cd s3-viewer
+go install github.com/ArthurQQII/s9s@latest
 ```
 
-2. Create and activate a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+### Binary Releases
+Download the latest release from the [releases page](https://github.com/ArthurQQII/s9s/releases).
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Configure AWS credentials:
-```bash
-aws configure
-```
+## Requirements
+- Go 1.21 or higher
+- AWS credentials configured
+- Terminal with 256 color support
 
 ## Usage
 
-1. Start the application:
+1. Start S9s:
 ```bash
-python src/main.py
+s9s
 ```
 
-2. Select an AWS profile from the credentials page
-3. Browse your S3 buckets and objects
-4. Use the search bar to filter objects
-5. Click column headers to sort
-6. Double-click folders to navigate
-7. Right-click objects for additional options
-
-## Development
-
-The application is built with:
-- PyQt6 for the GUI
-- boto3 for AWS S3 interaction
-- Python's threading for background operations
-
-### Project Structure
+2. Key Bindings:
 ```
-s3-viewer/
-├── src/
-│   ├── main.py
+Navigation:
+  ↑/k         : Move up
+  ↓/j         : Move down
+  →/l         : Enter folder
+  ←/h         : Go back
+  g           : Go to top
+  G           : Go to bottom
+  /           : Search
+  n           : Next search result
+  N           : Previous search result
+
+Operations:
+  space       : Select item
+  d           : Download selected
+  p           : Preview file
+  c           : Copy path
+  r           : Refresh
+  s           : Sort menu
+  f           : Filter menu
+
+Views:
+  1           : Bucket view
+  2           : Object view
+  3           : Preview view
+  :           : Command mode
+  ?           : Help
+
+General:
+  q           : Back/Quit
+  ctrl+c      : Exit
+  ctrl+r      : Refresh
+```
+
+## Project Structure
+```
+s9s/
+├── cmd/
+│   └── s9s/
+│       └── main.go
+├── internal/
+│   ├── app/
+│   │   ├── app.go
+│   │   └── config.go
+│   ├── aws/
+│   │   ├── client.go
+│   │   └── session.go
 │   ├── ui/
-│   │   ├── bucket_explorer_page.py
-│   │   ├── bucket_list_page.py
-│   │   ├── credential_page.py
-│   │   ├── loading_animation.py
-│   │   └── main_window.py
+│   │   ├── components/
+│   │   ├── views/
+│   │   └── styles/
 │   └── utils/
-│       └── aws_utils.py
-├── requirements.txt
+├── pkg/
+│   ├── s3/
+│   └── tui/
+├── go.mod
+├── go.sum
 └── README.md
 ```
 
+## Development
+
+### Architecture
+- Clean architecture principles
+- Dependency injection
+- Interface-based design
+- Event-driven UI
+- Modular components
+
+### Technology Stack
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea) - Terminal UI framework
+- [Lip Gloss](https://github.com/charmbracelet/lipgloss) - Style definitions
+- [AWS SDK for Go](https://github.com/aws/aws-sdk-go-v2) - AWS integration
+- [Cobra](https://github.com/spf13/cobra) - CLI framework
+- [Viper](https://github.com/spf13/viper) - Configuration
+
+### Building
+```bash
+make build
+```
+
+### Testing
+```bash
+make test
+```
+
+## Contributing
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md).
+
 ## License
-
 [MIT License](LICENSE)
-
-## Building the Application
-
-To build the application into a standalone executable, follow these steps:
-
-1. **Install PyInstaller**:
-   ```bash
-   pip install pyinstaller
-   ```
-
-2. **Create the Executable**:
-   Run the following command in your terminal:
-   ```bash
-   pyinstaller --onefile --windowed --icon=src/resources/app-icon.png --name=s3-viewer src/main.py
-   ```
-
-   - `--onefile`: Packages everything into a single executable.
-   - `--windowed`: Suppresses the console window (useful for GUI apps).
-   - `--icon`: Specifies the icon for the executable.
-   - `--name`: Sets the name of the executable to `s3-viewer`.
-
-3. **Find the Executable**:
-   After running the command, you'll find the executable in the `dist` directory.
-
-4. **Test the Executable**:
-   Run the executable to ensure everything works as expected.
-
 
 <a href="https://www.buymeacoffee.com/aurtherqi" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
