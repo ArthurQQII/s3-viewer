@@ -2,11 +2,11 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTableWidget,
                              QTableWidgetItem, QHeaderView, QMessageBox)
 from PyQt6.QtCore import pyqtSignal, Qt
-import boto3
-from botocore.exceptions import ClientError
+from src.utils.aws_utils import create_aws_session, get_s3_client, list_buckets
 
 class BucketListPage(QWidget):
     bucket_selected = pyqtSignal(str)
+    invalid_credentials = pyqtSignal()  # Signal for invalid credentials
     
     def __init__(self):
         super().__init__()
@@ -60,28 +60,39 @@ class BucketListPage(QWidget):
     def set_profile(self, profile_name):
         """Set the AWS profile and load buckets"""
         try:
-            self.session = boto3.Session(profile_name=profile_name)
-            self.s3_client = self.session.client('s3')
+            self.session = create_aws_session(profile_name)
+            self.s3_client = get_s3_client(self.session)
             self.load_buckets()
-        except ClientError as e:
-            QMessageBox.critical(
+        except Exception as e:
+            QMessageBox.warning(
                 self,
-                "Error",
-                f"Failed to load AWS profile: {str(e)}"
+                "Invalid Credentials",
+                "Your AWS credentials have expired or are invalid.\n\n"
+                "Please re-login using AWS CLI:\n"
+                "aws configure --profile your-profile-name\n\n"
+                "Or refresh your credentials if using temporary credentials."
             )
+            # Emit signal to return to credential page
+            self.invalid_credentials.emit()
+            return
     
     def load_buckets(self):
         """Load all buckets from S3"""
         try:
-            response = self.s3_client.list_buckets()
-            self.total_buckets = response['Buckets']
+            self.total_buckets = list_buckets(self.s3_client)
             self.update_bucket_table()
-        except ClientError as e:
-            QMessageBox.critical(
+        except Exception as e:
+            QMessageBox.warning(
                 self,
-                "Error",
-                f"Failed to load buckets: {str(e)}"
+                "Invalid Credentials",
+                "Your AWS credentials have expired or are invalid.\n\n"
+                "Please re-login using AWS CLI:\n"
+                "aws configure --profile your-profile-name\n\n"
+                "Or refresh your credentials if using temporary credentials."
             )
+            # Emit signal to return to credential page
+            self.invalid_credentials.emit()
+            return
     
     def update_bucket_table(self):
         """Update the bucket table with current page data"""

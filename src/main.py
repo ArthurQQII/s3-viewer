@@ -2,7 +2,12 @@ import sys
 import os
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
-from ui.main_window import MainWindow
+
+# Add the project root directory to the Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
+from src.ui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)

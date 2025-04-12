@@ -5,16 +5,16 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QMenu)
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap, QImage
-import boto3
-from botocore.exceptions import ClientError
 import os
 from datetime import datetime
 import tempfile
 import mimetypes
 import json
+from src.utils.aws_utils import get_s3_client, list_objects, get_object_metadata, download_file
 
 class BucketExplorerPage(QWidget):
-    back_to_buckets = pyqtSignal()  # New signal for returning to bucket list
+    back_to_buckets = pyqtSignal()  # Signal for returning to bucket list
+    invalid_credentials = pyqtSignal()  # Signal for invalid credentials
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,9 +94,22 @@ class BucketExplorerPage(QWidget):
     
     def set_session(self, session):
         """Set the AWS session"""
-        self.s3_client = session.client('s3')
-        if self.current_bucket:
-            self.load_objects()
+        try:
+            self.s3_client = get_s3_client(session)
+            if self.current_bucket:
+                self.load_objects()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Invalid Credentials",
+                "Your AWS credentials have expired or are invalid.\n\n"
+                "Please re-login using AWS CLI:\n"
+                "aws configure --profile your-profile-name\n\n"
+                "Or refresh your credentials if using temporary credentials."
+            )
+            # Emit signal to return to credential page
+            self.invalid_credentials.emit()
+            return
     
     def update_breadcrumb(self):
         """Update the breadcrumb navigation with clickable parts"""
@@ -144,11 +157,7 @@ class BucketExplorerPage(QWidget):
         """Load objects from the current bucket and prefix"""
         try:
             # List objects with delimiter for proper folder structure
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.current_bucket,
-                Prefix=self.current_prefix,
-                Delimiter='/'
-            )
+            response = list_objects(self.s3_client, self.current_bucket, self.current_prefix)
             
             self.total_objects = []
             
@@ -172,10 +181,7 @@ class BucketExplorerPage(QWidget):
                     if key != self.current_prefix:
                         # Get content type
                         try:
-                            head_response = self.s3_client.head_object(
-                                Bucket=self.current_bucket,
-                                Key=key
-                            )
+                            head_response = get_object_metadata(self.s3_client, self.current_bucket, key)
                             content_type = head_response.get('ContentType', 'N/A')
                         except:
                             content_type = 'N/A'
@@ -197,12 +203,18 @@ class BucketExplorerPage(QWidget):
             self.update_object_table()
             self.update_pagination_info()
             
-        except ClientError as e:
-            QMessageBox.critical(
+        except Exception as e:
+            QMessageBox.warning(
                 self,
-                "Error",
-                f"Failed to list objects: {str(e)}"
+                "Invalid Credentials",
+                "Your AWS credentials have expired or are invalid.\n\n"
+                "Please re-login using AWS CLI:\n"
+                "aws configure --profile your-profile-name\n\n"
+                "Or refresh your credentials if using temporary credentials."
             )
+            # Emit signal to return to credential page
+            self.invalid_credentials.emit()
+            return
     
     def update_object_table(self):
         """Update the object table with current page data"""
@@ -290,22 +302,24 @@ class BucketExplorerPage(QWidget):
         
         if save_path:
             try:
-                self.s3_client.download_file(
-                    self.current_bucket,
-                    obj['Key'],
-                    save_path
-                )
+                download_file(self.s3_client, self.current_bucket, obj['Key'], save_path)
                 QMessageBox.information(
                     self,
                     "Success",
                     f"File downloaded successfully to {save_path}"
                 )
-            except ClientError as e:
-                QMessageBox.critical(
+            except Exception as e:
+                QMessageBox.warning(
                     self,
-                    "Error",
-                    f"Failed to download file: {str(e)}"
+                    "Invalid Credentials",
+                    "Your AWS credentials have expired or are invalid.\n\n"
+                    "Please re-login using AWS CLI:\n"
+                    "aws configure --profile your-profile-name\n\n"
+                    "Or refresh your credentials if using temporary credentials."
                 )
+                # Emit signal to return to credential page
+                self.invalid_credentials.emit()
+                return
     
     def download_folder(self):
         """Download the entire folder"""
@@ -385,11 +399,7 @@ class BucketExplorerPage(QWidget):
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     
                     # Download file
-                    self.s3_client.download_file(
-                        self.current_bucket,
-                        s3_obj['Key'],
-                        local_path
-                    )
+                    download_file(self.s3_client, self.current_bucket, s3_obj['Key'], local_path)
                 
                 progress.setValue(100)
                 
@@ -398,12 +408,18 @@ class BucketExplorerPage(QWidget):
                     "Success",
                     f"Folder downloaded successfully to {base_folder}"
                 )
-            except ClientError as e:
-                QMessageBox.critical(
+            except Exception as e:
+                QMessageBox.warning(
                     self,
-                    "Error",
-                    f"Failed to download folder: {str(e)}"
+                    "Invalid Credentials",
+                    "Your AWS credentials have expired or are invalid.\n\n"
+                    "Please re-login using AWS CLI:\n"
+                    "aws configure --profile your-profile-name\n\n"
+                    "Or refresh your credentials if using temporary credentials."
                 )
+                # Emit signal to return to credential page
+                self.invalid_credentials.emit()
+                return
     
     def update_pagination_info(self):
         """Update pagination information display"""
@@ -464,11 +480,7 @@ class BucketExplorerPage(QWidget):
             temp_file = tempfile.NamedTemporaryFile(delete=False)
             temp_file.close()  # Close the file before downloading
             
-            self.s3_client.download_file(
-                self.current_bucket,
-                obj['Key'],
-                temp_file.name
-            )
+            download_file(self.s3_client, self.current_bucket, obj['Key'], temp_file.name)
             
             # Create preview dialog
             preview_dialog = QDialog(self)
@@ -532,12 +544,18 @@ class BucketExplorerPage(QWidget):
             preview_dialog.setLayout(dialog_layout)
             preview_dialog.exec()
             
-        except ClientError as e:
-            QMessageBox.critical(
+        except Exception as e:
+            QMessageBox.warning(
                 self,
-                "Error",
-                f"Failed to preview file: {str(e)}"
+                "Invalid Credentials",
+                "Your AWS credentials have expired or are invalid.\n\n"
+                "Please re-login using AWS CLI:\n"
+                "aws configure --profile your-profile-name\n\n"
+                "Or refresh your credentials if using temporary credentials."
             )
+            # Emit signal to return to credential page
+            self.invalid_credentials.emit()
+            return
         finally:
             # Clean up temporary file
             if temp_file:
