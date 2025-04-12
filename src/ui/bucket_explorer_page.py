@@ -2,15 +2,19 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTableWidget,
                              QTableWidgetItem, QHeaderView, QMessageBox,
                              QFileDialog, QDialog, QPlainTextEdit, QProgressDialog,
-                             QMenu)
-from PyQt6.QtCore import pyqtSignal, Qt
+                             QMenu, QSlider)
+from PyQt6.QtCore import pyqtSignal, Qt, QUrl
 from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 import os
 from datetime import datetime
 import tempfile
 import mimetypes
 import json
 from src.utils.aws_utils import get_s3_client, list_objects, get_object_metadata, download_file
+from src.ui.loading_animation import LoadingAnimation
+from PyQt6.QtWidgets import QApplication
 
 class BucketExplorerPage(QWidget):
     back_to_buckets = pyqtSignal()  # Signal for returning to bucket list
@@ -23,7 +27,7 @@ class BucketExplorerPage(QWidget):
         self.current_prefix = ""
         self.total_objects = []
         self.current_page = 1
-        self.page_size = 1000
+        self.page_size = 100  # Changed from 1000 to 100 items per page
         self.total_pages = 1
         self.total_items = 0
         self.sort_column = 0  # Default sort column
@@ -83,6 +87,11 @@ class BucketExplorerPage(QWidget):
         pagination_layout.addStretch()
         layout.addLayout(pagination_layout)
         
+        # Add loading animation
+        self.loading_animation = LoadingAnimation(self, "Loading objects...")
+        self.loading_animation.setVisible(False)
+        layout.addWidget(self.loading_animation)
+        
         self.setLayout(layout)
     
     def set_bucket(self, bucket_name):
@@ -95,6 +104,8 @@ class BucketExplorerPage(QWidget):
     def set_session(self, session):
         """Set the AWS session"""
         try:
+            self.loading_animation.setText("Setting up AWS session...")
+            self.loading_animation.setVisible(True)
             self.s3_client = get_s3_client(session)
             if self.current_bucket:
                 self.load_objects()
@@ -110,6 +121,8 @@ class BucketExplorerPage(QWidget):
             # Emit signal to return to credential page
             self.invalid_credentials.emit()
             return
+        finally:
+            self.loading_animation.setVisible(False)
     
     def update_breadcrumb(self):
         """Update the breadcrumb navigation with clickable parts"""
@@ -150,13 +163,18 @@ class BucketExplorerPage(QWidget):
     
     def navigate_to(self, prefix):
         """Navigate to a specific prefix when clicking breadcrumb"""
+        self.loading_animation.setText(f"Navigating to {prefix}...")
+        self.loading_animation.setVisible(True)
         self.current_prefix = prefix
         self.load_objects()
     
     def load_objects(self):
         """Load objects from the current bucket and prefix"""
         try:
-            # List objects with delimiter for proper folder structure
+            self.loading_animation.setText(f"Loading objects from {self.current_bucket}/{self.current_prefix}")
+            self.loading_animation.setVisible(True)
+            QApplication.processEvents()  # Force UI update
+            
             response = list_objects(self.s3_client, self.current_bucket, self.current_prefix)
             
             self.total_objects = []
@@ -215,6 +233,9 @@ class BucketExplorerPage(QWidget):
             # Emit signal to return to credential page
             self.invalid_credentials.emit()
             return
+        finally:
+            self.loading_animation.setVisible(False)
+            QApplication.processEvents()  # Force UI update
     
     def update_object_table(self):
         """Update the object table with current page data"""
@@ -248,178 +269,177 @@ class BucketExplorerPage(QWidget):
             
             # Content Type column
             content_type = obj['ContentType']
+            if content_type == 'folder':
+                content_type = 'Directory'
             self.object_table.setItem(i, 3, QTableWidgetItem(content_type))
-        
-        # Update pagination buttons
-        self.prev_button.setEnabled(self.current_page > 1)
-        self.next_button.setEnabled(end_idx < len(self.total_objects))
     
     def format_size(self, size_bytes):
         """Format file size in human-readable format"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
+                return f"{size_bytes:.2f} {unit}"
             size_bytes /= 1024.0
-        return f"{size_bytes:.1f} PB"
+        return f"{size_bytes:.2f} PB"
+    
+    def format_time(self, ms):
+        """Format milliseconds into MM:SS format"""
+        s = ms // 1000
+        m = s // 60
+        s = s % 60
+        return f"{m:02d}:{s:02d}"
     
     def show_context_menu(self, position):
-        """Show context menu for right-click actions"""
+        """Show context menu for object actions"""
         menu = QMenu()
-        selected_items = self.object_table.selectedItems()
+        download_action = menu.addAction("Download")
+        preview_action = menu.addAction("Preview")
         
-        if selected_items:
-            row = selected_items[0].row()
-            obj = self.total_objects[row]
-            
-            if obj['is_folder']:
-                download_action = menu.addAction("Download Folder")
-                download_action.triggered.connect(self.download_folder)
-            else:
-                download_action = menu.addAction("Download")
-                download_action.triggered.connect(self.download_file)
+        action = menu.exec(self.object_table.mapToGlobal(position))
         
-        menu.exec(self.object_table.viewport().mapToGlobal(position))
+        if action == download_action:
+            self.download_file()
+        elif action == preview_action:
+            selected_items = self.object_table.selectedItems()
+            if selected_items:
+                row = selected_items[0].row()
+                obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+                self.preview_object(obj)
     
     def download_file(self):
-        """Download a single file"""
+        """Download the selected file"""
         selected_items = self.object_table.selectedItems()
         if not selected_items:
             return
         
         row = selected_items[0].row()
-        obj = self.total_objects[row]
+        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
         
         if obj['is_folder']:
+            self.download_folder()
             return
         
-        # Get save location from user
-        file_name = obj['Key'].split('/')[-1]
-        save_path, _ = QFileDialog.getSaveFileName(
+        # Get file name from key
+        file_name = os.path.basename(obj['Key'])
+        
+        # Ask user where to save the file
+        file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save File",
-            file_name
+            file_name,
+            "All Files (*.*)"
         )
         
-        if save_path:
-            try:
-                download_file(self.s3_client, self.current_bucket, obj['Key'], save_path)
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    f"File downloaded successfully to {save_path}"
-                )
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Invalid Credentials",
-                    "Your AWS credentials have expired or are invalid.\n\n"
-                    "Please re-login using AWS CLI:\n"
-                    "aws configure --profile your-profile-name\n\n"
-                    "Or refresh your credentials if using temporary credentials."
-                )
-                # Emit signal to return to credential page
-                self.invalid_credentials.emit()
-                return
-    
-    def download_folder(self):
-        """Download the entire folder"""
-        selected_items = self.object_table.selectedItems()
-        if not selected_items:
+        if not file_path:
+            return
+        
+        try:
+            self.loading_animation.setText(f"Downloading {file_name}...")
+            self.loading_animation.setVisible(True)
+            QApplication.processEvents()  # Force UI update
+            
+            # Download the file
+            download_file(self.s3_client, self.current_bucket, obj['Key'], file_path)
+            
+            QMessageBox.information(
+                self,
+                "Download Complete",
+                f"File downloaded successfully to:\n{file_path}"
+            )
+        except Exception as e:
             QMessageBox.warning(
                 self,
-                "No Selection",
-                "Please select a folder to download."
+                "Download Failed",
+                f"Failed to download file: {str(e)}"
             )
+        finally:
+            self.loading_animation.setVisible(False)
+            QApplication.processEvents()  # Force UI update
+    
+    def download_folder(self):
+        """Download the selected folder"""
+        selected_items = self.object_table.selectedItems()
+        if not selected_items:
             return
         
         row = selected_items[0].row()
-        obj = self.total_objects[row]
+        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
         
         if not obj['is_folder']:
-            QMessageBox.warning(
-                self,
-                "Invalid Selection",
-                "Please select a folder to download."
-            )
+            self.download_file()
             return
         
-        # Get save location from user
-        folder_name = obj['Key'][len(self.current_prefix):].rstrip('/')
-        save_path = QFileDialog.getExistingDirectory(
+        # Get folder name from key
+        folder_name = os.path.basename(obj['Key'].rstrip('/'))
+        
+        # Ask user where to save the folder
+        folder_path = QFileDialog.getExistingDirectory(
             self,
-            "Save Folder",
-            folder_name
+            "Select Directory to Save Folder",
+            os.path.expanduser("~")
         )
         
-        if save_path:
-            try:
-                # Create a progress dialog
-                progress = QProgressDialog("Downloading folder...", "Cancel", 0, 100, self)
-                progress.setWindowModality(Qt.WindowModality.WindowModal)
-                progress.setMinimumDuration(0)
-                progress.setValue(0)
-                
-                # Get all objects in the folder
-                folder_prefix = obj['Key']
-                paginator = self.s3_client.get_paginator('list_objects_v2')
-                all_objects = []
-                
-                for page in paginator.paginate(Bucket=self.current_bucket, Prefix=folder_prefix):
-                    if 'Contents' in page:
-                        all_objects.extend(page['Contents'])
-                
-                total_objects = len(all_objects)
-                if total_objects == 0:
-                    QMessageBox.information(
-                        self,
-                        "Empty Folder",
-                        "The selected folder is empty."
-                    )
-                    return
-                
-                # Create the base folder
-                folder_name = os.path.basename(obj['Key'].rstrip('/'))
-                base_folder = os.path.join(save_path, folder_name)
-                os.makedirs(base_folder, exist_ok=True)
-                
-                # Download each object
-                for i, s3_obj in enumerate(all_objects):
-                    if progress.wasCanceled():
-                        break
-                    
-                    # Update progress
-                    progress.setValue(int((i / total_objects) * 100))
-                    progress.setLabelText(f"Downloading {s3_obj['Key']}...")
-                    
-                    # Create local path (preserving folder structure)
-                    rel_path = s3_obj['Key'][len(folder_prefix):]  # Get path relative to folder
-                    local_path = os.path.join(base_folder, rel_path.lstrip('/'))
-                    
-                    # Create directory if needed
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    
-                    # Download file
-                    download_file(self.s3_client, self.current_bucket, s3_obj['Key'], local_path)
-                
-                progress.setValue(100)
-                
+        if not folder_path:
+            return
+        
+        # Create folder path
+        save_path = os.path.join(folder_path, folder_name)
+        os.makedirs(save_path, exist_ok=True)
+        
+        try:
+            self.loading_animation.setText(f"Downloading folder {folder_name}...")
+            self.loading_animation.setVisible(True)
+            QApplication.processEvents()  # Force UI update
+            
+            # List all objects in the folder
+            prefix = obj['Key']
+            response = list_objects(self.s3_client, self.current_bucket, prefix)
+            
+            if 'Contents' not in response:
                 QMessageBox.information(
                     self,
-                    "Success",
-                    f"Folder downloaded successfully to {base_folder}"
+                    "Download Complete",
+                    f"Folder downloaded successfully to:\n{save_path}"
                 )
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Invalid Credentials",
-                    "Your AWS credentials have expired or are invalid.\n\n"
-                    "Please re-login using AWS CLI:\n"
-                    "aws configure --profile your-profile-name\n\n"
-                    "Or refresh your credentials if using temporary credentials."
-                )
-                # Emit signal to return to credential page
-                self.invalid_credentials.emit()
                 return
+            
+            # Count total files
+            total_files = len(response['Contents'])
+            downloaded_files = 0
+            
+            # Download each file
+            for obj in response['Contents']:
+                key = obj['Key']
+                file_name = os.path.basename(key)
+                local_path = os.path.join(save_path, file_name)
+                
+                # Skip if it's a folder
+                if key.endswith('/'):
+                    continue
+                
+                # Update loading animation text
+                self.loading_animation.setText(f"Downloading {file_name} ({downloaded_files + 1}/{total_files})...")
+                QApplication.processEvents()  # Force UI update
+                
+                # Download the file
+                download_file(self.s3_client, self.current_bucket, key, local_path)
+                
+                # Update progress
+                downloaded_files += 1
+            
+            QMessageBox.information(
+                self,
+                "Download Complete",
+                f"Folder downloaded successfully to:\n{save_path}"
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Download Failed",
+                f"Failed to download folder: {str(e)}"
+            )
+        finally:
+            self.loading_animation.setVisible(False)
+            QApplication.processEvents()  # Force UI update
     
     def update_pagination_info(self):
         """Update pagination information display"""
@@ -428,149 +448,225 @@ class BucketExplorerPage(QWidget):
         self.next_button.setEnabled(self.current_page < self.total_pages)
     
     def go_back(self):
-        """Go back to parent folder"""
+        """Go back to the parent folder"""
         if self.current_prefix:
-            self.current_prefix = os.path.dirname(self.current_prefix.rstrip('/'))
-            if self.current_prefix:
-                self.current_prefix += '/'
-            self.update_breadcrumb()
-            self.load_objects()
-    
-    def previous_page(self):
-        """Go to previous page"""
-        if self.current_page > 1:
-            self.current_page -= 1
-            self.load_objects()
-    
-    def next_page(self):
-        """Go to next page"""
-        if (self.current_page * self.page_size) < len(self.total_objects):
-            self.current_page += 1
-            self.load_objects()
-    
-    def on_object_double_clicked(self, item):
-        """Handle object selection"""
-        row = item.row()
-        obj = self.total_objects[row]
-        
-        if obj['is_folder']:
-            self.current_prefix = obj['Key']
-            self.update_breadcrumb()
+            parent_prefix = os.path.dirname(self.current_prefix.rstrip('/'))
+            if parent_prefix:
+                parent_prefix += '/'
+            self.current_prefix = parent_prefix
             self.load_objects()
         else:
+            self.back_to_buckets.emit()
+    
+    def previous_page(self):
+        """Go to the previous page"""
+        if self.current_page > 1:
+            self.loading_animation.setText(f"Loading page {self.current_page - 1}...")
+            self.loading_animation.setVisible(True)
+            self.current_page -= 1
+            self.update_object_table()
+            self.update_pagination_info()
+            self.loading_animation.setVisible(False)
+    
+    def next_page(self):
+        """Go to the next page"""
+        if self.current_page < self.total_pages:
+            self.loading_animation.setText(f"Loading page {self.current_page + 1}...")
+            self.loading_animation.setVisible(True)
+            self.current_page += 1
+            self.update_object_table()
+            self.update_pagination_info()
+            self.loading_animation.setVisible(False)
+    
+    def on_object_double_clicked(self, item):
+        """Handle object double-click"""
+        row = item.row()
+        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+        
+        if obj['is_folder']:
+            # Navigate into folder
+            self.current_prefix = obj['Key']
+            self.load_objects()
+        else:
+            # Preview file
             self.preview_object(obj)
     
     def preview_object(self, obj):
         """Preview the selected object"""
-        # Get file extension and mime type
-        file_name = obj['Key']
-        mime_type, _ = mimetypes.guess_type(file_name)
-        
-        if not mime_type:
-            QMessageBox.information(
-                self,
-                "Preview Unavailable",
-                "Preview is not available for this file type."
-            )
+        if obj['is_folder']:
             return
+
+        content_type = obj['ContentType']
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Preview: {os.path.basename(obj['Key'])}")
+        dialog.setMinimumSize(800, 600)
         
-        temp_file = None
-        try:
-            # Create a temporary file to store the downloaded content
-            temp_file = tempfile.NamedTemporaryFile(delete=False)
-            temp_file.close()  # Close the file before downloading
-            
-            download_file(self.s3_client, self.current_bucket, obj['Key'], temp_file.name)
-            
-            # Create preview dialog
-            preview_dialog = QDialog(self)
-            preview_dialog.setWindowTitle(f"Preview: {os.path.basename(file_name)}")
-            preview_dialog.resize(800, 600)
-            
-            dialog_layout = QVBoxLayout()
-            
-            if mime_type.startswith('image/'):
-                # Handle image preview
-                image_label = QLabel()
-                pixmap = QPixmap(temp_file.name)
-                scaled_pixmap = pixmap.scaled(780, 580, Qt.AspectRatioMode.KeepAspectRatio)
-                image_label.setPixmap(scaled_pixmap)
-                dialog_layout.addWidget(image_label)
-            
-            elif mime_type == 'application/pdf':
-                # For PDF, show a message that it needs to be downloaded
-                msg_label = QLabel("PDF files need to be downloaded to view.")
-                dialog_layout.addWidget(msg_label)
-            
-            elif mime_type.startswith('text/') or mime_type in ['application/json']:
-                # Handle text preview
-                try:
-                    with open(temp_file.name, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        if mime_type == 'application/json':
-                            # Pretty print JSON
-                            try:
-                                parsed = json.loads(content)
-                                content = json.dumps(parsed, indent=2)
-                            except:
-                                pass
-                        text_edit = QPlainTextEdit()
-                        text_edit.setPlainText(content)
-                        text_edit.setReadOnly(True)
-                        dialog_layout.addWidget(text_edit)
-                except UnicodeDecodeError:
-                    QMessageBox.warning(
-                        self,
-                        "Preview Error",
-                        "Unable to preview this text file. It might be binary or encoded."
-                    )
-                    preview_dialog.close()
-                    return
-            
-            else:
-                QMessageBox.information(
-                    self,
-                    "Preview Unavailable",
-                    "Preview is not available for this file type."
+        layout = QVBoxLayout()
+        
+        content_type_label = QLabel(f"Content Type: {content_type}")
+        layout.addWidget(content_type_label)
+        
+        if content_type.startswith('image/'):
+            # Image preview
+            try:
+                # Download to temp file
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                download_file(self.s3_client, self.current_bucket, obj['Key'], temp_path)
+                
+                # Load image
+                pixmap = QPixmap(temp_path)
+                
+                # Scale to fit dialog
+                scaled_pixmap = pixmap.scaled(
+                    dialog.width() - 40,
+                    dialog.height() - 100,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
                 )
-                preview_dialog.close()
-                return
-            
-            # Add close button
-            close_btn = QPushButton("Close")
-            close_btn.clicked.connect(preview_dialog.close)
-            dialog_layout.addWidget(close_btn)
-            
-            preview_dialog.setLayout(dialog_layout)
-            preview_dialog.exec()
-            
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Invalid Credentials",
-                "Your AWS credentials have expired or are invalid.\n\n"
-                "Please re-login using AWS CLI:\n"
-                "aws configure --profile your-profile-name\n\n"
-                "Or refresh your credentials if using temporary credentials."
-            )
-            # Emit signal to return to credential page
-            self.invalid_credentials.emit()
-            return
-        finally:
-            # Clean up temporary file
-            if temp_file:
-                try:
-                    os.unlink(temp_file.name)
-                except:
-                    pass
+                
+                # Display image
+                image_label = QLabel()
+                image_label.setPixmap(scaled_pixmap)
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(image_label)
+                
+                # Clean up temp file
+                os.unlink(temp_path)
+            except Exception as e:
+                error_label = QLabel(f"Failed to load image: {str(e)}")
+                layout.addWidget(error_label)
+        elif content_type.startswith('video/'):
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(obj['Key'])[1]) as temp_file:
+                    temp_path = temp_file.name
+                
+                download_file(self.s3_client, self.current_bucket, obj['Key'], temp_path)
+                
+                video_widget = QVideoWidget()
+                layout.addWidget(video_widget)
+                
+                media_player = QMediaPlayer()
+                audio_output = QAudioOutput()
+                media_player.setAudioOutput(audio_output)
+                media_player.setVideoOutput(video_widget)
+                media_player.setSource(QUrl.fromLocalFile(temp_path))
+                
+                # Add controls
+                controls_layout = QHBoxLayout()
+                
+                play_button = QPushButton("Play")
+                play_button.clicked.connect(media_player.play)
+                controls_layout.addWidget(play_button)
+                
+                pause_button = QPushButton("Pause")
+                pause_button.clicked.connect(media_player.pause)
+                controls_layout.addWidget(pause_button)
+                
+                stop_button = QPushButton("Stop")
+                stop_button.clicked.connect(media_player.stop)
+                controls_layout.addWidget(stop_button)
+                
+                # Add rewind button
+                rewind_button = QPushButton("⏪ -10s")
+                rewind_button.clicked.connect(lambda: media_player.setPosition(max(0, media_player.position() - 10000)))
+                controls_layout.addWidget(rewind_button)
+                
+                # Add forward button
+                forward_button = QPushButton("⏩ +10s")
+                forward_button.clicked.connect(lambda: media_player.setPosition(media_player.position() + 10000))
+                controls_layout.addWidget(forward_button)
+                
+                # Add position slider and time labels
+                slider_layout = QHBoxLayout()
+                
+                # Current time label
+                current_time_label = QLabel("00:00")
+                slider_layout.addWidget(current_time_label)
+                
+                # Position slider
+                position_slider = QSlider(Qt.Orientation.Horizontal)
+                position_slider.setRange(0, 0)  # Will be updated when duration is available
+                position_slider.sliderMoved.connect(media_player.setPosition)
+                slider_layout.addWidget(position_slider)
+                
+                # Duration label
+                duration_label = QLabel("00:00")
+                slider_layout.addWidget(duration_label)
+                
+                # Update slider and labels when duration is available
+                def update_duration(duration):
+                    position_slider.setRange(0, duration)
+                    duration_label.setText(self.format_time(duration))
+                
+                def update_position(position):
+                    if not position_slider.isSliderDown():
+                        position_slider.setValue(position)
+                    current_time_label.setText(self.format_time(position))
+                
+                media_player.durationChanged.connect(update_duration)
+                media_player.positionChanged.connect(update_position)
+                
+                controls_layout.addLayout(slider_layout)
+                layout.addLayout(controls_layout)
+                
+                def cleanup():
+                    media_player.stop()
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
+                
+                dialog.finished.connect(cleanup)
+                
+            except Exception as e:
+                error_label = QLabel(f"Failed to load video: {str(e)}")
+                layout.addWidget(error_label)
+        elif content_type.startswith('text/') or content_type == 'application/json':
+            # Text preview
+            try:
+                # Download to temp file
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                download_file(self.s3_client, self.current_bucket, obj['Key'], temp_path)
+                
+                # Load text
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    text = f.read()
+                
+                # Display text
+                text_edit = QPlainTextEdit()
+                text_edit.setPlainText(text)
+                text_edit.setReadOnly(True)
+                layout.addWidget(text_edit)
+                
+                # Clean up temp file
+                os.unlink(temp_path)
+            except Exception as e:
+                error_label = QLabel(f"Failed to load text: {str(e)}")
+                layout.addWidget(error_label)
+        else:
+            # Unsupported content type
+            unsupported_label = QLabel(f"Preview not supported for content type: {content_type}")
+            layout.addWidget(unsupported_label)
+        
+        # Add close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        
+        dialog.setLayout(layout)
+        dialog.exec()
     
     def on_header_clicked(self, column):
-        """Handle column header click for sorting"""
-        if column == self.sort_column:
-            # Toggle sort order if clicking the same column
+        """Handle header click for sorting"""
+        if self.sort_column == column:
+            # Toggle sort order
             self.sort_order = Qt.SortOrder.DescendingOrder if self.sort_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
         else:
-            # Set new sort column and default to ascending
+            # Set new sort column
             self.sort_column = column
             self.sort_order = Qt.SortOrder.AscendingOrder
         
@@ -578,29 +674,20 @@ class BucketExplorerPage(QWidget):
         self.update_object_table()
     
     def sort_objects(self):
-        """Sort objects based on current column and order"""
-        reverse = self.sort_order == Qt.SortOrder.DescendingOrder
+        """Sort objects based on current sort column and order"""
+        # Define sort key function based on column
+        def get_sort_key(obj):
+            if self.sort_column == 0:  # Name
+                return obj['Key'].lower()
+            elif self.sort_column == 1:  # Size
+                return obj['Size'] or 0
+            elif self.sort_column == 2:  # Last Modified
+                return obj['LastModified'] or datetime.min
+            elif self.sort_column == 3:  # Content Type
+                return obj['ContentType'].lower()
+            return obj['Key'].lower()
         
-        if self.sort_column == 0:  # Name
-            self.total_objects.sort(
-                key=lambda x: x['Key'].lower(),
-                reverse=reverse
-            )
-        elif self.sort_column == 1:  # Size
-            self.total_objects.sort(
-                key=lambda x: x['Size'],
-                reverse=reverse
-            )
-        elif self.sort_column == 2:  # Last Modified
-            self.total_objects.sort(
-                key=lambda x: x['LastModified'].timestamp() if x['LastModified'] else 0,
-                reverse=reverse
-            )
-        elif self.sort_column == 3:  # Content Type
-            self.total_objects.sort(
-                key=lambda x: x['ContentType'].lower(),
-                reverse=reverse
-            )
-
+        # Sort objects
+        self.total_objects.sort(key=get_sort_key, reverse=(self.sort_order == Qt.SortOrder.DescendingOrder))
         self.update_object_table()
         self.update_pagination_info() 
