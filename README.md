@@ -1,39 +1,72 @@
 # S3 Viewer
 
-A modern, cross-platform desktop application for browsing and managing AWS S3 buckets and objects.
+A desktop application for browsing and managing AWS S3 buckets with a modern, user-friendly interface.
 
 ## Features
 
-- Browse S3 buckets and objects with a clean, modern interface
-- Support for multiple AWS profiles
-- Search and filter buckets and objects
-- Download files
-- Folder navigation with breadcrumb path
-- Pagination for large buckets
-- Cross-platform support (Windows, macOS, Linux)
+### Bucket Navigation
+- Browse S3 buckets and folders with an intuitive interface
+- Breadcrumb navigation for easy folder traversal
+- Efficient loading of large buckets with progressive loading
+- Clear folder structure visualization
+
+### File Management
+- View file details: name, size, last modified date, and content type
+- Download individual files or entire folders
+- Preview support for multiple file types:
+  - Images: Direct preview in the application
+  - Videos: Browser-based preview with pre-signed URLs
+  - Text files: Built-in text viewer
+  - JSON files: Formatted preview
+
+### Search and Filter
+- Real-time search functionality
+- Search by:
+  - File name
+  - File extension (e.g., .mp4, .jpg)
+  - Content type
+- Clear search button for quick reset
+
+### Sorting
+- Sort by any column:
+  - Name
+  - Size
+  - Last Modified
+  - Content Type
+- Toggle between ascending and descending order
+
+### Performance Features
+- Progressive loading for large buckets
+- Background loading of objects
+- Immediate display of first 100 items
+- Responsive UI during loading
+- Pagination with customizable page size
+
+### AWS Integration
+- AWS CLI profile support
+- Secure credential management
+- Pre-signed URLs for video streaming
+- Proper error handling for invalid credentials
 
 ## Requirements
 
 - Python 3.8 or higher
-- AWS CLI configured with at least one profile
+- PyQt6
+- boto3
+- AWS CLI configured with valid credentials
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone git@github.com:ArthurQQII/s3-viewer.git
+git clone https://github.com/yourusername/s3-viewer.git
 cd s3-viewer
 ```
 
 2. Create and activate a virtual environment:
 ```bash
-# Windows
-py -m venv venv
-.\venv\Scripts\activate
-
-# macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
 3. Install dependencies:
@@ -41,34 +74,52 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
-
-1. Make sure you have AWS CLI configured with at least one profile:
+4. Configure AWS credentials:
 ```bash
-aws configure --profile your-profile-name
+aws configure
 ```
 
-2. Run the application:
+## Usage
+
+1. Start the application:
 ```bash
 python src/main.py
 ```
 
-3. Select your AWS profile from the dropdown menu
-4. Browse your S3 buckets and objects
-5. Double-click on folders to navigate
-6. Double-click on files to preview (coming soon)
-7. Select a file and click "Download" to save it locally
+2. Select an AWS profile from the credentials page
+3. Browse your S3 buckets and objects
+4. Use the search bar to filter objects
+5. Click column headers to sort
+6. Double-click folders to navigate
+7. Right-click objects for additional options
 
 ## Development
 
-The application is built using:
+The application is built with:
 - PyQt6 for the GUI
-- boto3 for AWS S3 operations
-- Python 3.8+ for the backend
+- boto3 for AWS S3 interaction
+- Python's threading for background operations
+
+### Project Structure
+```
+s3-viewer/
+├── src/
+│   ├── main.py
+│   ├── ui/
+│   │   ├── bucket_explorer_page.py
+│   │   ├── bucket_list_page.py
+│   │   ├── credential_page.py
+│   │   ├── loading_animation.py
+│   │   └── main_window.py
+│   └── utils/
+│       └── aws_utils.py
+├── requirements.txt
+└── README.md
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[MIT License](LICENSE)
 
 ## Building the Application
 
