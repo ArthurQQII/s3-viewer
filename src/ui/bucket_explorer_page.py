@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidgetItem, QHeaderView, QMessageBox,
                              QFileDialog, QDialog, QPlainTextEdit, QProgressDialog,
                              QMenu, QSlider)
-from PyQt6.QtCore import pyqtSignal, Qt, QUrl
+from PyQt6.QtCore import pyqtSignal, Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -12,9 +12,104 @@ from datetime import datetime
 import tempfile
 import mimetypes
 import json
-from src.utils.aws_utils import get_s3_client, list_objects, get_object_metadata, download_file
+import webbrowser
+from src.utils.aws_utils import (get_s3_client, list_objects, get_object_metadata, 
+                               download_file, generate_presigned_url)
 from src.ui.loading_animation import LoadingAnimation
 from PyQt6.QtWidgets import QApplication
+
+class ObjectLoaderThread(QThread):
+    """Thread for loading objects in the background"""
+    objects_loaded = pyqtSignal(list, bool, bool)  # objects, is_complete, is_first_batch
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, s3_client, bucket, prefix, continuation_token=None):
+        super().__init__()
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.prefix = prefix
+        self.continuation_token = continuation_token
+        self.is_running = True
+        self.max_objects_per_batch = 100
+    
+    def run(self):
+        try:
+            # Load objects with continuation token if provided
+            response = list_objects(
+                self.s3_client,
+                self.bucket,
+                self.prefix,
+                delimiter='/' if not self.prefix.endswith('/') else None,  # Only use delimiter for root level
+                continuation_token=self.continuation_token
+            )
+            
+            # Process objects
+            objects = []
+            
+            # Add folders (CommonPrefixes)
+            if 'CommonPrefixes' in response:
+                for prefix in response['CommonPrefixes']:
+                    folder_name = prefix['Prefix']
+                    objects.append({
+                        'Key': folder_name,
+                        'Size': 0,
+                        'LastModified': None,
+                        'ContentType': 'folder',
+                        'is_folder': True
+                    })
+            
+            # Add files
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    # Skip the current prefix itself
+                    if key != self.prefix:
+                        # Get content type
+                        try:
+                            head_response = get_object_metadata(self.s3_client, self.bucket, key)
+                            content_type = head_response.get('ContentType', 'N/A')
+                        except:
+                            content_type = 'N/A'
+                        
+                        objects.append({
+                            'Key': key,
+                            'Size': obj['Size'],
+                            'LastModified': obj['LastModified'],
+                            'ContentType': content_type,
+                            'is_folder': False
+                        })
+                    
+                    # If we have enough objects for the first batch, emit them immediately
+                    if not self.continuation_token and len(objects) >= self.max_objects_per_batch:
+                        self.objects_loaded.emit(objects[:self.max_objects_per_batch], False, True)
+                        objects = objects[self.max_objects_per_batch:]
+            
+            # Check if there are more objects to load
+            is_complete = 'NextContinuationToken' not in response
+            
+            # Emit any remaining objects
+            if objects:
+                self.objects_loaded.emit(objects, is_complete, not self.continuation_token)
+            
+            # If there are more objects and the thread is still running, continue loading
+            if not is_complete and self.is_running:
+                next_token = response['NextContinuationToken']
+                # Create a new thread to load the next batch
+                next_loader = ObjectLoaderThread(self.s3_client, self.bucket, self.prefix, next_token)
+                next_loader.objects_loaded.connect(self.on_next_batch_loaded)
+                next_loader.error_occurred.connect(self.error_occurred)
+                next_loader.start()
+                
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+    
+    def on_next_batch_loaded(self, objects, is_complete, is_first_batch):
+        """Handle objects loaded from the next batch"""
+        self.objects_loaded.emit(objects, is_complete, False)  # Never first batch for continuation
+    
+    def stop(self):
+        """Stop the thread"""
+        self.is_running = False
 
 class BucketExplorerPage(QWidget):
     back_to_buckets = pyqtSignal()  # Signal for returning to bucket list
@@ -26,12 +121,15 @@ class BucketExplorerPage(QWidget):
         self.current_bucket = None
         self.current_prefix = ""
         self.total_objects = []
+        self.filtered_objects = []  # Store filtered objects
         self.current_page = 1
-        self.page_size = 100  # Changed from 1000 to 100 items per page
+        self.page_size = 100
         self.total_pages = 1
         self.total_items = 0
-        self.sort_column = 0  # Default sort column
-        self.sort_order = Qt.SortOrder.AscendingOrder  # Default sort order
+        self.sort_column = 0
+        self.sort_order = Qt.SortOrder.AscendingOrder
+        self.loader_thread = None
+        self.is_loading_complete = False
         self.setup_ui()
     
     def setup_ui(self):
@@ -44,7 +142,7 @@ class BucketExplorerPage(QWidget):
         # Back button on the left
         self.back_button = QPushButton("← Back to Buckets")
         self.back_button.clicked.connect(lambda: self.back_to_buckets.emit())
-        self.back_button.setMaximumWidth(150)  # Limit width
+        self.back_button.setMaximumWidth(150)
         top_bar.addWidget(self.back_button)
         
         # Add some spacing
@@ -58,6 +156,22 @@ class BucketExplorerPage(QWidget):
         top_bar.addLayout(self.breadcrumb_layout)
         
         layout.addLayout(top_bar)
+        
+        # Search bar
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("Search:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search by name or file type (e.g. .mp4, .jpg)")
+        self.search_input.textChanged.connect(self.on_search_changed)
+        search_layout.addWidget(self.search_input)
+        
+        # Clear search button
+        self.clear_search_button = QPushButton("Clear")
+        self.clear_search_button.clicked.connect(self.clear_search)
+        self.clear_search_button.setVisible(False)
+        search_layout.addWidget(self.clear_search_button)
+        
+        layout.addLayout(search_layout)
         
         # Object table
         self.object_table = QTableWidget()
@@ -96,6 +210,7 @@ class BucketExplorerPage(QWidget):
     
     def set_bucket(self, bucket_name):
         """Set the current bucket and load its contents"""
+        self.clear_data()  # Clear previous data
         self.current_bucket = bucket_name
         self.current_prefix = ""
         self.update_breadcrumb()
@@ -173,51 +288,30 @@ class BucketExplorerPage(QWidget):
         try:
             self.loading_animation.setText(f"Loading objects from {self.current_bucket}/{self.current_prefix}")
             self.loading_animation.setVisible(True)
-            QApplication.processEvents()  # Force UI update
+            QApplication.processEvents()
             
-            response = list_objects(self.s3_client, self.current_bucket, self.current_prefix)
+            # Disable search and sorting during loading
+            self.search_input.setEnabled(False)
+            self.object_table.horizontalHeader().setSectionsClickable(False)
             
+            # Stop any existing loader thread
+            if self.loader_thread and self.loader_thread.isRunning():
+                self.loader_thread.stop()
+                self.loader_thread.wait()
+            
+            # Reset state
             self.total_objects = []
+            self.filtered_objects = []
+            self.is_loading_complete = False
+            self.current_page = 1
             
-            # Add folders (CommonPrefixes)
-            if 'CommonPrefixes' in response:
-                for prefix in response['CommonPrefixes']:
-                    folder_name = prefix['Prefix']
-                    self.total_objects.append({
-                        'Key': folder_name,
-                        'Size': 0,
-                        'LastModified': None,
-                        'ContentType': 'folder',
-                        'is_folder': True
-                    })
+            # Create and start the loader thread
+            self.loader_thread = ObjectLoaderThread(self.s3_client, self.current_bucket, self.current_prefix)
+            self.loader_thread.objects_loaded.connect(self.on_objects_loaded)
+            self.loader_thread.error_occurred.connect(self.on_loader_error)
+            self.loader_thread.start()
             
-            # Add files
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    key = obj['Key']
-                    # Skip the current prefix itself
-                    if key != self.current_prefix:
-                        # Get content type
-                        try:
-                            head_response = get_object_metadata(self.s3_client, self.current_bucket, key)
-                            content_type = head_response.get('ContentType', 'N/A')
-                        except:
-                            content_type = 'N/A'
-                        
-                        self.total_objects.append({
-                            'Key': key,
-                            'Size': obj['Size'],
-                            'LastModified': obj['LastModified'],
-                            'ContentType': content_type,
-                            'is_folder': False
-                        })
-            
-            # Update total items and pages
-            self.total_items = len(self.total_objects)
-            self.total_pages = (self.total_items + self.page_size - 1) // self.page_size
-            self.current_page = 1  # Reset to first page when entering a new folder
-            
-            self.sort_objects()
+            # Update UI with initial empty state
             self.update_object_table()
             self.update_pagination_info()
             
@@ -230,18 +324,71 @@ class BucketExplorerPage(QWidget):
                 "aws configure --profile your-profile-name\n\n"
                 "Or refresh your credentials if using temporary credentials."
             )
-            # Emit signal to return to credential page
             self.invalid_credentials.emit()
             return
-        finally:
+    
+    def on_objects_loaded(self, objects, is_complete, is_first_batch):
+        """Handle objects loaded from the background thread"""
+        # Add new objects to the total list
+        self.total_objects.extend(objects)
+        
+        # Only update filtered objects if no search is active
+        if not self.search_input.text():
+            self.filtered_objects = self.total_objects
+        
+        # Update loading state
+        self.is_loading_complete = is_complete
+        
+        # Update UI
+        self.total_items = len(self.filtered_objects)
+        self.total_pages = (self.total_items + self.page_size - 1) // self.page_size
+        
+        # Update table and pagination
+        self.update_object_table()
+        self.update_pagination_info()
+        
+        # Update loading animation text
+        if is_complete:
+            self.loading_animation.setText(f"Loaded {len(self.total_objects)} objects")
             self.loading_animation.setVisible(False)
-            QApplication.processEvents()  # Force UI update
+            
+            # Re-enable search and sorting
+            self.search_input.setEnabled(True)
+            self.object_table.horizontalHeader().setSectionsClickable(True)
+            
+            # Apply current search filter if any
+            if self.search_input.text():
+                self.filter_objects(self.search_input.text())
+        else:
+            if is_first_batch:
+                self.loading_animation.setText(f"Loaded first {len(objects)} objects, loading more in background...")
+            else:
+                self.loading_animation.setText(f"Loaded {len(self.total_objects)} objects so far...")
+            self.loading_animation.setVisible(True)
+        
+        # Enable UI interaction after first batch
+        if is_first_batch:
+            self.object_table.setEnabled(True)
+            self.prev_button.setEnabled(self.current_page > 1)
+            self.next_button.setEnabled(self.current_page < self.total_pages)
+        
+        QApplication.processEvents()
+    
+    def on_loader_error(self, error_message):
+        """Handle error from the loader thread"""
+        QMessageBox.warning(
+            self,
+            "Loading Error",
+            f"Error loading objects: {error_message}"
+        )
+        self.loading_animation.setVisible(False)
+        QApplication.processEvents()  # Force UI update
     
     def update_object_table(self):
         """Update the object table with current page data"""
         start_idx = (self.current_page - 1) * self.page_size
         end_idx = start_idx + self.page_size
-        current_objects = self.total_objects[start_idx:end_idx]
+        current_objects = self.filtered_objects[start_idx:end_idx]
         
         self.object_table.setRowCount(len(current_objects))
         for i, obj in enumerate(current_objects):
@@ -302,7 +449,7 @@ class BucketExplorerPage(QWidget):
             selected_items = self.object_table.selectedItems()
             if selected_items:
                 row = selected_items[0].row()
-                obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+                obj = self.filtered_objects[(self.current_page - 1) * self.page_size + row]
                 self.preview_object(obj)
     
     def download_file(self):
@@ -312,7 +459,7 @@ class BucketExplorerPage(QWidget):
             return
         
         row = selected_items[0].row()
-        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+        obj = self.filtered_objects[(self.current_page - 1) * self.page_size + row]
         
         if obj['is_folder']:
             self.download_folder()
@@ -362,7 +509,7 @@ class BucketExplorerPage(QWidget):
             return
         
         row = selected_items[0].row()
-        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+        obj = self.filtered_objects[(self.current_page - 1) * self.page_size + row]
         
         if not obj['is_folder']:
             self.download_file()
@@ -456,7 +603,32 @@ class BucketExplorerPage(QWidget):
             self.current_prefix = parent_prefix
             self.load_objects()
         else:
+            # Clear all data before going back to bucket list
+            self.clear_data()
             self.back_to_buckets.emit()
+    
+    def clear_data(self):
+        """Clear all stored data when leaving bucket"""
+        # Stop any running thread
+        if self.loader_thread and self.loader_thread.isRunning():
+            self.loader_thread.stop()
+            self.loader_thread.wait()
+        
+        # Clear data
+        self.current_bucket = None
+        self.current_prefix = ""
+        self.total_objects = []
+        self.filtered_objects = []
+        self.current_page = 1
+        self.total_pages = 1
+        self.total_items = 0
+        self.is_loading_complete = False
+        
+        # Clear UI
+        self.object_table.setRowCount(0)
+        self.search_input.clear()
+        self.update_pagination_info()
+        self.loading_animation.setVisible(False)
     
     def previous_page(self):
         """Go to the previous page"""
@@ -481,7 +653,7 @@ class BucketExplorerPage(QWidget):
     def on_object_double_clicked(self, item):
         """Handle object double-click"""
         row = item.row()
-        obj = self.total_objects[(self.current_page - 1) * self.page_size + row]
+        obj = self.filtered_objects[(self.current_page - 1) * self.page_size + row]
         
         if obj['is_folder']:
             # Navigate into folder
@@ -497,6 +669,33 @@ class BucketExplorerPage(QWidget):
             return
 
         content_type = obj['ContentType']
+        
+        if content_type.startswith('video/'):
+            try:
+                # Generate pre-signed URL with 1-hour expiration
+                url = generate_presigned_url(self.s3_client, self.current_bucket, obj['Key'])
+                
+                # Open URL in default browser
+                webbrowser.open(url)
+                
+                # Show information message
+                QMessageBox.information(
+                    self,
+                    "Video Preview",
+                    "The video will open in your default web browser.\n"
+                    "The link will expire in 1 hour."
+                )
+                return
+                
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Preview Failed",
+                    f"Failed to generate video preview URL: {str(e)}"
+                )
+                return
+        
+        # For non-video content types, create preview dialog
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Preview: {os.path.basename(obj['Key'])}")
         dialog.setMinimumSize(800, 600)
@@ -537,92 +736,6 @@ class BucketExplorerPage(QWidget):
             except Exception as e:
                 error_label = QLabel(f"Failed to load image: {str(e)}")
                 layout.addWidget(error_label)
-        elif content_type.startswith('video/'):
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(obj['Key'])[1]) as temp_file:
-                    temp_path = temp_file.name
-                
-                download_file(self.s3_client, self.current_bucket, obj['Key'], temp_path)
-                
-                video_widget = QVideoWidget()
-                layout.addWidget(video_widget)
-                
-                media_player = QMediaPlayer()
-                audio_output = QAudioOutput()
-                media_player.setAudioOutput(audio_output)
-                media_player.setVideoOutput(video_widget)
-                media_player.setSource(QUrl.fromLocalFile(temp_path))
-                
-                # Add controls
-                controls_layout = QHBoxLayout()
-                
-                play_button = QPushButton("Play")
-                play_button.clicked.connect(media_player.play)
-                controls_layout.addWidget(play_button)
-                
-                pause_button = QPushButton("Pause")
-                pause_button.clicked.connect(media_player.pause)
-                controls_layout.addWidget(pause_button)
-                
-                stop_button = QPushButton("Stop")
-                stop_button.clicked.connect(media_player.stop)
-                controls_layout.addWidget(stop_button)
-                
-                # Add rewind button
-                rewind_button = QPushButton("⏪ -10s")
-                rewind_button.clicked.connect(lambda: media_player.setPosition(max(0, media_player.position() - 10000)))
-                controls_layout.addWidget(rewind_button)
-                
-                # Add forward button
-                forward_button = QPushButton("⏩ +10s")
-                forward_button.clicked.connect(lambda: media_player.setPosition(media_player.position() + 10000))
-                controls_layout.addWidget(forward_button)
-                
-                # Add position slider and time labels
-                slider_layout = QHBoxLayout()
-                
-                # Current time label
-                current_time_label = QLabel("00:00")
-                slider_layout.addWidget(current_time_label)
-                
-                # Position slider
-                position_slider = QSlider(Qt.Orientation.Horizontal)
-                position_slider.setRange(0, 0)  # Will be updated when duration is available
-                position_slider.sliderMoved.connect(media_player.setPosition)
-                slider_layout.addWidget(position_slider)
-                
-                # Duration label
-                duration_label = QLabel("00:00")
-                slider_layout.addWidget(duration_label)
-                
-                # Update slider and labels when duration is available
-                def update_duration(duration):
-                    position_slider.setRange(0, duration)
-                    duration_label.setText(self.format_time(duration))
-                
-                def update_position(position):
-                    if not position_slider.isSliderDown():
-                        position_slider.setValue(position)
-                    current_time_label.setText(self.format_time(position))
-                
-                media_player.durationChanged.connect(update_duration)
-                media_player.positionChanged.connect(update_position)
-                
-                controls_layout.addLayout(slider_layout)
-                layout.addLayout(controls_layout)
-                
-                def cleanup():
-                    media_player.stop()
-                    try:
-                        os.unlink(temp_path)
-                    except:
-                        pass
-                
-                dialog.finished.connect(cleanup)
-                
-            except Exception as e:
-                error_label = QLabel(f"Failed to load video: {str(e)}")
-                layout.addWidget(error_label)
         elif content_type.startswith('text/') or content_type == 'application/json':
             # Text preview
             try:
@@ -662,16 +775,17 @@ class BucketExplorerPage(QWidget):
     
     def on_header_clicked(self, column):
         """Handle header click for sorting"""
+        # Only allow sorting when loading is complete
+        if not self.is_loading_complete:
+            return
+            
         if self.sort_column == column:
-            # Toggle sort order
             self.sort_order = Qt.SortOrder.DescendingOrder if self.sort_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
         else:
-            # Set new sort column
             self.sort_column = column
             self.sort_order = Qt.SortOrder.AscendingOrder
         
         self.sort_objects()
-        self.update_object_table()
     
     def sort_objects(self):
         """Sort objects based on current sort column and order"""
@@ -682,12 +796,53 @@ class BucketExplorerPage(QWidget):
             elif self.sort_column == 1:  # Size
                 return obj['Size'] or 0
             elif self.sort_column == 2:  # Last Modified
-                return obj['LastModified'] or datetime.min
+                # Convert to naive datetime by removing timezone info
+                last_modified = obj['LastModified']
+                if last_modified is None:
+                    return datetime.min
+                if last_modified.tzinfo:
+                    # Convert to UTC then remove timezone info
+                    return last_modified.astimezone().replace(tzinfo=None)
+                return last_modified
             elif self.sort_column == 3:  # Content Type
                 return obj['ContentType'].lower()
             return obj['Key'].lower()
         
         # Sort objects
-        self.total_objects.sort(key=get_sort_key, reverse=(self.sort_order == Qt.SortOrder.DescendingOrder))
+        self.filtered_objects.sort(key=get_sort_key, reverse=(self.sort_order == Qt.SortOrder.DescendingOrder))
+        self.update_object_table()
+        self.update_pagination_info()
+    
+    def on_search_changed(self, search_text):
+        """Handle search text changes"""
+        # Only allow search when loading is complete
+        if not self.is_loading_complete:
+            return
+            
+        self.clear_search_button.setVisible(bool(search_text))
+        self.filter_objects(search_text)
+    
+    def clear_search(self):
+        """Clear the search input"""
+        self.search_input.clear()
+    
+    def filter_objects(self, search_text):
+        """Filter objects based on search text"""
+        if not search_text:
+            self.filtered_objects = self.total_objects
+        else:
+            search_text = search_text.lower()
+            self.filtered_objects = [
+                obj for obj in self.total_objects
+                if (search_text in os.path.basename(obj['Key']).lower() or  # Match filename
+                    search_text in obj['ContentType'].lower() or  # Match content type
+                    (search_text.startswith('.') and  # Match file extension
+                     os.path.basename(obj['Key']).lower().endswith(search_text)))
+            ]
+        
+        # Reset to first page and update UI
+        self.current_page = 1
+        self.total_items = len(self.filtered_objects)
+        self.total_pages = (self.total_items + self.page_size - 1) // self.page_size
         self.update_object_table()
         self.update_pagination_info() 

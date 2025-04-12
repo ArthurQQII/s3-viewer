@@ -52,14 +52,23 @@ def list_buckets(s3_client):
     except ClientError as e:
         raise Exception(f"Failed to list buckets: {str(e)}")
 
-def list_objects(s3_client, bucket, prefix='', delimiter='/'):
+def list_objects(s3_client, bucket, prefix='', delimiter='/', continuation_token=None):
     """List objects in a bucket with the given prefix"""
     try:
-        response = s3_client.list_objects_v2(
-            Bucket=bucket,
-            Prefix=prefix,
-            Delimiter=delimiter
-        )
+        params = {
+            'Bucket': bucket,
+            'Prefix': prefix
+        }
+        
+        # Add delimiter only if it's not None
+        if delimiter is not None:
+            params['Delimiter'] = delimiter
+        
+        # Add continuation token if provided
+        if continuation_token:
+            params['ContinuationToken'] = continuation_token
+            
+        response = s3_client.list_objects_v2(**params)
         return response
     except ClientError as e:
         raise Exception(f"Failed to list objects: {str(e)}")
@@ -80,4 +89,29 @@ def download_file(s3_client, bucket, key, local_path):
     try:
         s3_client.download_file(bucket, key, local_path)
     except ClientError as e:
-        raise Exception(f"Failed to download file: {str(e)}") 
+        raise Exception(f"Failed to download file: {str(e)}")
+
+def generate_presigned_url(s3_client, bucket, key, expiration=3600):
+    """Generate a pre-signed URL for an S3 object
+    
+    Args:
+        s3_client: boto3 S3 client
+        bucket: S3 bucket name
+        key: S3 object key
+        expiration: URL expiration time in seconds (default: 1 hour)
+    
+    Returns:
+        str: Pre-signed URL
+    """
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': bucket,
+                'Key': key
+            },
+            ExpiresIn=expiration
+        )
+        return url
+    except ClientError as e:
+        raise Exception(f"Failed to generate pre-signed URL: {str(e)}") 
